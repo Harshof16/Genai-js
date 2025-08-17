@@ -10,8 +10,22 @@ async function getWeatherDetailsByCity(cityname = '') {
     return `The current weather of ${cityname} is ${data}`
 }
 
+async function executeCommand(cmd = '') {
+    return new Promise((res, rej) => {
+        exec(cmd, (err, data) => {
+            if (err) {
+                return res(`Error running command ${err}`);
+            } else {
+                res(data);
+            }
+
+        })
+    })
+}
+
 const TOOL_MAP = {
-    getWeatherDetailsByCity: getWeatherDetailsByCity
+    getWeatherDetailsByCity: getWeatherDetailsByCity,
+    executeCommand: executeCommand,
 };
 
 async function main() {
@@ -59,61 +73,79 @@ async function main() {
         },
         {
             role: 'user',
-            content: 'The current weather in lucknow',
+            content: 'Tell me the weather of Delhi, Bhubneshwar and Bangalore',
         },
     ];
 
-    while (true) {
+    mainLoop: while (true) {
         const response = await client.chat.completions.create({
             model: 'gpt-4o-mini',
             messages
-        })
+        });
+
         const rawContent = response.choices[0].message.content;
-        const parsedContent = JSON.parse(rawContent);
 
-        messages.push({
-            role: 'assistant',
-            content: JSON.stringify(parsedContent)
-        })
+        let cleaned = rawContent
+            .trim()
+            .replace(/(ASSISTANT:|DEVELOPER:)/g, '')
+            .trim();
 
-        if (parsedContent.step === 'START') {
-            console.log(`🔥`, parsedContent.content);
-            continue;
+        if (!cleaned.startsWith("[")) {
+            cleaned = `[${cleaned.replace(/}\s*{/g, '},{')}]`;
         }
 
-        if (parsedContent.step === 'THINK') {
-            console.log(`\t💭`, parsedContent.content);
-            continue;
-        }
+        const parsedArray = JSON.parse(cleaned);
 
-        if (parsedContent.step === 'TOOL') {
-            const toolToCall = parsedContent.tool_name;
-            if (!TOOL_MAP[toolToCall]) {
+        try {
+            for (const parsedContent of parsedArray) {
                 messages.push({
-                    role: 'developer',
-                    content: `There is no such tool as ${toolToCall}`,
+                    role: 'assistant',
+                    content: JSON.stringify(parsedContent)
                 });
-                continue;
+
+                if (parsedContent.step === 'START') {
+                    console.log(`🔥`, parsedContent.content);
+                    continue;
+                }
+
+                if (parsedContent.step === 'THINK') {
+                    console.log(`\t💭`, parsedContent.content);
+                    continue;
+                }
+
+                if (parsedContent.step === 'TOOL') {
+                    const toolToCall = parsedContent.tool_name;
+                    if (!TOOL_MAP[toolToCall]) {
+                        messages.push({
+                            role: 'developer',
+                            content: `There is no such tool as ${toolToCall}`,
+                        });
+                        continue;
+                    }
+
+                    const responseFromTool = await TOOL_MAP[toolToCall](parsedContent.input);
+                    console.log(`🛠️: ${toolToCall}[${parsedContent.input}] = `, responseFromTool);
+
+                    messages.push({
+                        role: 'developer',
+                        content: JSON.stringify({ step: 'OBSERVE', content: responseFromTool }),
+                    });
+                    continue;
+                }
+
+                if (parsedContent.step === 'OUTPUT') {
+                    console.log(`🤖`, parsedContent.content);
+                    break mainLoop;  // breaks the outer while loop
+                }
             }
-
-            const responseFromTool = await TOOL_MAP[toolToCall](parsedContent.input);
-            console.log(
-                `🛠️: ${toolToCall}[${parsedContent.input}] = `,
-                responseFromTool
-            );
-            messages.push({
-                role: 'developer',
-                content: JSON.stringify({ step: 'OBSERVE', content: responseFromTool }),
-            });
+        } catch (error) {
+            console.error("❌ Error parsing JSON:", error, rawContent);
             continue;
-        }
-
-        if (parsedContent.step === 'OUTPUT') {
-            console.log(`🤖`, parsedContent.content);
-            break;
         }
     }
+
     console.log('Done...');
+
 }
 
 main();
