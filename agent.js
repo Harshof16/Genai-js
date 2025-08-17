@@ -1,6 +1,10 @@
 import OpenAI from "openai";
 import 'dotenv/config';
 import axios from "axios";
+import { exec } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import readline from 'readline';
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -10,23 +14,44 @@ async function getWeatherDetailsByCity(cityname = '') {
     return `The current weather of ${cityname} is ${data}`
 }
 
-async function executeCommand(cmd = '') {
-    return new Promise((res, rej) => {
-        exec(cmd, (err, data) => {
-            if (err) {
-                return res(`Error running command ${err}`);
-            } else {
-                res(data);
-            }
+async function saveWeatherToFile(folderName = "checkWeather", fileName = "weather.txt", content = "") {
+    const folderPath = path.join(process.cwd(), folderName);
 
-        })
-    })
+    // Create folder if it doesn't exist
+    if (!fs.existsSync(folderPath)) {
+        fs.mkdirSync(folderPath, { recursive: true });
+    }
+
+    // Write content to file
+    const filePath = path.join(folderPath, fileName);
+    fs.writeFileSync(filePath, content, "utf-8");
+
+    return `Weather details saved to ${filePath}`;
 }
+
+// async function executeCommand(cmd = '') {
+//     return new Promise((res, rej) => {
+//         exec(cmd, (err, data) => {
+//             if (err) {
+//                 return res(`Error running command ${err}`);
+//             } else {
+//                 res(data);
+//             }
+
+//         })
+//     })
+// }
 
 const TOOL_MAP = {
     getWeatherDetailsByCity: getWeatherDetailsByCity,
-    executeCommand: executeCommand,
+    // executeCommand: executeCommand,
+    saveWeatherToFile: saveWeatherToFile
 };
+
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+});
 
 async function main() {
     const SYSTEM_PROMPT = `
@@ -44,6 +69,7 @@ async function main() {
     - getWeatherDetailsByCity(cityname: string): Returns the current weather data of the city.
     - getGithubUserInfoByUsername(username: string): Retuns the public info about the github user using github api
     - executeCommand(command: string): Takes a linux / unix command as arg and executes the command on user's machine and returns the output
+    - saveWeatherToFile(folderName: string, fileName: string, content: string): Creates a folder (if it doesn't exist) and saves the provided content into a file inside that folder.
 
     Rules:
     - Strictly follow the output JSON format.
@@ -66,86 +92,113 @@ async function main() {
     ASSISTANT: { "step": "THINK", "content": "Great, I got the weather details of Lucknow" }
     ASSISTANT: { "step": "OUTPUT", "content": "The weather in Lucknow is 27 C with little cloud. Please make sure to carry an umbrella with you. ☔️" }
     `
-    const messages = [
-        {
-            role: 'system',
-            content: SYSTEM_PROMPT,
-        },
-        {
-            role: 'user',
-            content: 'Tell me the weather of Delhi, Bhubneshwar and Bangalore',
-        },
-    ];
 
-    mainLoop: while (true) {
-        const response = await client.chat.completions.create({
-            model: 'gpt-4o-mini',
-            messages
-        });
+    rl.question('Enter the city name: ', async (cityName) => {
+        const messages = [
+            {
+                role: 'system',
+                content: SYSTEM_PROMPT,
+            },
+            {
+                role: 'user',
+                content: `Tell me the weather of ${cityName} and creata a folder named "checkWeather" in the same directory and save the weather details in a file named "weather.txt" inside that folder`,
+            },
+        ];
 
-        const rawContent = response.choices[0].message.content;
+        mainLoop: while (true) {
+            const response = await client.chat.completions.create({
+                model: 'gpt-4o-mini',
+                messages
+            });
+            const rawContent = response.choices[0].message.content;
 
-        let cleaned = rawContent
-            .trim()
-            .replace(/(ASSISTANT:|DEVELOPER:)/g, '')
-            .trim();
+            let cleaned = rawContent
+                .trim()
+                .replace(/(ASSISTANT:|DEVELOPER:)/g, '')
+                .trim();
 
-        if (!cleaned.startsWith("[")) {
-            cleaned = `[${cleaned.replace(/}\s*{/g, '},{')}]`;
-        }
+            if (!cleaned.startsWith("[")) {
+                cleaned = `[${cleaned.replace(/}\s*{/g, '},{')}]`;
+            }
 
-        const parsedArray = JSON.parse(cleaned);
+            const parsedArray = JSON.parse(cleaned);
 
-        try {
-            for (const parsedContent of parsedArray) {
-                messages.push({
-                    role: 'assistant',
-                    content: JSON.stringify(parsedContent)
-                });
+            try {
+                for (const parsedContent of parsedArray) {
+                    messages.push({
+                        role: 'assistant',
+                        content: JSON.stringify(parsedContent)
+                    });
 
-                if (parsedContent.step === 'START') {
-                    console.log(`🔥`, parsedContent.content);
-                    continue;
-                }
-
-                if (parsedContent.step === 'THINK') {
-                    console.log(`\t💭`, parsedContent.content);
-                    continue;
-                }
-
-                if (parsedContent.step === 'TOOL') {
-                    const toolToCall = parsedContent.tool_name;
-                    if (!TOOL_MAP[toolToCall]) {
-                        messages.push({
-                            role: 'developer',
-                            content: `There is no such tool as ${toolToCall}`,
-                        });
+                    if (parsedContent.step === 'START') {
+                        console.log(`🔥`, parsedContent.content);
                         continue;
                     }
 
-                    const responseFromTool = await TOOL_MAP[toolToCall](parsedContent.input);
-                    console.log(`🛠️: ${toolToCall}[${parsedContent.input}] = `, responseFromTool);
+                    if (parsedContent.step === 'THINK') {
+                        console.log(`\t💭`, parsedContent.content);
+                        continue;
+                    }
 
-                    messages.push({
-                        role: 'developer',
-                        content: JSON.stringify({ step: 'OBSERVE', content: responseFromTool }),
-                    });
-                    continue;
-                }
+                    if (parsedContent.step === 'TOOL') {
+                        const toolToCall = parsedContent.tool_name;
+                        const input = parsedContent.input;
 
-                if (parsedContent.step === 'OUTPUT') {
-                    console.log(`🤖`, parsedContent.content);
-                    break mainLoop;  // breaks the outer while loop
+                        if (!TOOL_MAP[toolToCall]) {
+                            messages.push({
+                                role: 'developer',
+                                content: `There is no such tool as ${toolToCall}`,
+                            });
+                            continue;
+                        }
+
+                        let responseFromTool;
+
+                        // Special handling for saving weather to file
+                        if (toolToCall === 'saveWeatherToFile') {
+                            if (!global.weatherDetails) {
+                                console.error("⚠️ No weather details available to save!");
+                                continue;
+                            }
+
+                            responseFromTool = await TOOL_MAP[toolToCall](
+                                'checkWeather',      // folder
+                                'weather.txt',       // file
+                                global.weatherDetails // content to write
+                            );
+                            console.log(`🛠️: saveWeatherToFile =`, responseFromTool);
+                        } else {
+                            responseFromTool = await TOOL_MAP[toolToCall](input);
+                            console.log(`🛠️: ${toolToCall}[${input}] =`, responseFromTool);
+
+                            // Store the latest weather details globally if it's weather tool
+                            if (toolToCall === 'getWeatherDetailsByCity') {
+                                global.weatherDetails = responseFromTool;
+                            }
+                        }
+
+                        messages.push({
+                            role: 'developer',
+                            content: JSON.stringify({ step: 'OBSERVE', content: responseFromTool }),
+                        });
+
+                        continue;
+                    }
+
+                    if (parsedContent.step === 'OUTPUT') {
+                        console.log(`🤖`, parsedContent.content);
+                        break mainLoop;  // breaks the outer while loop
+                    }
                 }
+            } catch (error) {
+                console.error("❌ Error parsing JSON:", error, rawContent);
+                continue;
             }
-        } catch (error) {
-            console.error("❌ Error parsing JSON:", error, rawContent);
-            continue;
         }
-    }
 
-    console.log('Done...');
-
+        console.log('Done...');
+        rl.close();
+    })
 }
 
 main();
